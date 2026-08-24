@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import AlbumGallery from './components/AlbumGallery';
 import BirthdayJourney from './components/BirthdayJourney';
 import MidnightCinematic from './components/MidnightCinematic';
 import { birthdayConfig } from './data/birthdayConfig';
@@ -9,6 +10,34 @@ const BIRTHDAY_MUSIC_URL = birthdayConfig.birthdayMusicEmbedUrl;
 const MUSIC_TRACKS = { romance: ROMANTIC_MUSIC_URL, birthday: BIRTHDAY_MUSIC_URL };
 
 const emptyCountdown = { days: '00', hours: '00', minutes: '00', seconds: '00' };
+
+function youtubePlayerUrl(source, autoplay) {
+  const url = new URL(source);
+  url.searchParams.set('autoplay', autoplay ? '1' : '0');
+  url.searchParams.set('enablejsapi', '1');
+  url.searchParams.set('playsinline', '1');
+  return url.toString();
+}
+
+function entityId(entity) {
+  return entity?.id ?? entity?._id;
+}
+
+function albumMedia(album) {
+  if (Array.isArray(album?.media)) return album.media;
+  if (Array.isArray(album?.items)) return album.items;
+  return [];
+}
+
+function isVideoMedia(media) {
+  return media?.type === 'video'
+    || media?.mediaType === 'video'
+    || String(media?.mimeType ?? '').startsWith('video/');
+}
+
+function albumMediaUrl(albumId, mediaId) {
+  return `${API_BASE}/albums/${albumId}/media/${mediaId}/file`;
+}
 
 function CountdownBox({ value, label }) {
   return (
@@ -73,9 +102,11 @@ export default function App() {
   const [isAdmin, setIsAdmin] = useState(false); const [adminOpen, setAdminOpen] = useState(false); const [pinDialogOpen, setPinDialogOpen] = useState(false); const [pin, setPin] = useState(''); const [pinChecking, setPinChecking] = useState(false);
   const [photos, setPhotos] = useState([]); const [frustrations, setFrustrations] = useState([]);
   const [frustText, setFrustText] = useState(''); const [photoFile, setPhotoFile] = useState(null); const [uploading, setUploading] = useState(false);
+  const [albums, setAlbums] = useState([]); const [albumName, setAlbumName] = useState(''); const [albumTargetId, setAlbumTargetId] = useState(''); const [albumFiles, setAlbumFiles] = useState([]);
+  const [creatingAlbum, setCreatingAlbum] = useState(false); const [uploadingAlbumMedia, setUploadingAlbumMedia] = useState(false); const [albumUploadProgress, setAlbumUploadProgress] = useState(''); const [albumNotice, setAlbumNotice] = useState('');
   const [countdown, setCountdown] = useState(emptyCountdown); const [isBirthday, setIsBirthday] = useState(false);
   const [surpriseOpen, setSurpriseOpen] = useState(false); const [birthdayJourneyOpen, setBirthdayJourneyOpen] = useState(false); const [cinematicOpen, setCinematicOpen] = useState(false); const [giftOpened, setGiftOpened] = useState(false); const [popup, setPopup] = useState(null); const [flipped, setFlipped] = useState(false); const [musicOn, setMusicOn] = useState(false); const [activeTrack, setActiveTrack] = useState('romance');
-  const popupIndex = useRef(0); const targetDate = useRef(null); const photoInputRef = useRef(null);
+  const popupIndex = useRef(0); const targetDate = useRef(null); const photoInputRef = useRef(null); const albumFileInputRef = useRef(null);
   const iframeRef = useRef(null); // YouTube iframe ke liye ref
   const musicOnRef = useRef(false); const activeTrackRef = useRef('romance'); const cinematicTriggeredRef = useRef(false);
   const journeyPhotos = useMemo(() => photos.map(photo => ({ id: photo.id, src: `${API_BASE}/photos/${photo.id}/image` })), [photos]);
@@ -114,11 +145,26 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
+  const sendMusicCommand = (command) => {
+    const playerWindow = iframeRef.current?.contentWindow;
+    if (!playerWindow) return;
+    playerWindow.postMessage(JSON.stringify({ event: 'command', func: command, args: [] }), '*');
+  };
+
   const playTrack = (track) => {
     const iframe = iframeRef.current;
     if (!iframe) return;
-    if (activeTrackRef.current === track && musicOnRef.current) return;
-    iframe.src = MUSIC_TRACKS[track];
+    const trackChanged = activeTrackRef.current !== track;
+    if (!trackChanged && musicOnRef.current) {
+      sendMusicCommand('playVideo');
+      return;
+    }
+
+    if (trackChanged) {
+      iframe.src = youtubePlayerUrl(MUSIC_TRACKS[track], true);
+    } else {
+      sendMusicCommand('playVideo');
+    }
     activeTrackRef.current = track;
     musicOnRef.current = true;
     setActiveTrack(track);
@@ -131,7 +177,7 @@ export default function App() {
   const pauseMusic = () => {
     const iframe = iframeRef.current;
     if (!iframe || !musicOnRef.current) return;
-    iframe.src = MUSIC_TRACKS[activeTrackRef.current].replace('autoplay=1', 'autoplay=0');
+    sendMusicCommand('pauseVideo');
     musicOnRef.current = false;
     setMusicOn(false);
   };
@@ -142,26 +188,26 @@ export default function App() {
     if (!iframe) return;
     
     if (musicOnRef.current) {
-      iframe.src = MUSIC_TRACKS[activeTrackRef.current].replace('autoplay=1', 'autoplay=0');
+      sendMusicCommand('pauseVideo');
       musicOnRef.current = false;
       setMusicOn(false);
     } else {
-      iframe.src = MUSIC_TRACKS[activeTrackRef.current];
+      sendMusicCommand('playVideo');
       musicOnRef.current = true;
       setMusicOn(true);
     }
   };
 
   useEffect(() => {
-    const startOnFirstGesture = () => {
+    const events = ['pointerdown', 'touchstart', 'keydown'];
+    const removeGestureListeners = () => events.forEach(eventName => window.removeEventListener(eventName, startOnFirstGesture, true));
+    const startOnFirstGesture = (event) => {
+      removeGestureListeners();
+      if (event.target?.closest?.('[data-music-control]')) return;
       if (!cinematicTriggeredRef.current) startMusic();
     };
-    window.addEventListener('pointerdown', startOnFirstGesture, { once: true, capture: true });
-    window.addEventListener('keydown', startOnFirstGesture, { once: true });
-    return () => {
-      window.removeEventListener('pointerdown', startOnFirstGesture, { capture: true });
-      window.removeEventListener('keydown', startOnFirstGesture);
-    };
+    events.forEach(eventName => window.addEventListener(eventName, startOnFirstGesture, { capture: true, passive: true }));
+    return removeGestureListeners;
   }, []);
 
   useEffect(() => {
@@ -174,7 +220,9 @@ export default function App() {
   // API requests intentionally match the original implementation.
   const loadPhotos = useCallback(async () => { try { const response = await fetch(`${API_BASE}/photos`); const result = await response.json(); const photoList = Array.isArray(result) ? result : []; setPhotos(photoList); return photoList; } catch (err) { return []; } }, []);
   const loadFrustrations = useCallback(async () => { try { const response = await fetch(`${API_BASE}/frustrations`); const result = await response.json(); const frustrationList = Array.isArray(result) ? result : []; setFrustrations(frustrationList); return frustrationList; } catch (err) { console.error(err); return []; } }, []);
+  const loadAlbums = useCallback(async () => { try { const response = await fetch(`${API_BASE}/albums`); if (!response.ok) return []; const result = await response.json(); const albumList = Array.isArray(result) ? result : Array.isArray(result?.albums) ? result.albums : []; setAlbums(albumList); return albumList; } catch (err) { return []; } }, []);
   useEffect(() => { loadPhotos(); loadFrustrations(); const timer = setInterval(() => loadFrustrations(), 15000); return () => clearInterval(timer); }, [loadPhotos, loadFrustrations]);
+  useEffect(() => { loadAlbums(); }, [loadAlbums]);
   useEffect(() => { const timer = setInterval(() => { setFrustrations(items => { if (items.length) { const frustration = items[popupIndex.current % items.length]; popupIndex.current++; setFlipped(false); setPopup(frustration); } return items; }); }, 30000); return () => clearInterval(timer); }, []);
   useEffect(() => { if (!popup) return; const timer = setTimeout(() => setPopup(null), 8000); return () => clearTimeout(timer); }, [popup]);
 
@@ -182,6 +230,65 @@ export default function App() {
   async function uploadPhoto() { if (!isAdmin) { alert('Admin access required!'); return; } if (!photoFile || uploading) { if (!photoFile) alert('Select a photo'); return; } const formData = new FormData(); formData.append('file', photoFile); setUploading(true); try { await fetch(`${API_BASE}/photos/upload`, { method: 'POST', body: formData }); setPhotoFile(null); if (photoInputRef.current) photoInputRef.current.value = ''; alert('Uploaded!'); loadPhotos(); } finally { setUploading(false); } }
   async function deletePhoto(id) { if (!isAdmin) return; await fetch(`${API_BASE}/photos/${id}`, { method: 'DELETE' }); loadPhotos(); }
   async function addFrustration() { if (!isAdmin) { alert('Admin access required!'); return; } const text = frustText.trim(); if (!text) { alert('Write something!'); return; } await fetch(`${API_BASE}/frustrations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(text) }); setFrustText(''); await loadFrustrations(); }
+  async function createAlbum() {
+    if (!isAdmin || creatingAlbum) return;
+    const name = albumName.trim();
+    if (!name) { setAlbumNotice('Album ka naam likho.'); return; }
+    setCreatingAlbum(true); setAlbumNotice('');
+    try {
+      const response = await fetch(`${API_BASE}/albums`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+      if (!response.ok) throw new Error('Album create failed');
+      const createdAlbum = await response.json();
+      setAlbumName('');
+      if (entityId(createdAlbum)) setAlbumTargetId(String(entityId(createdAlbum)));
+      await loadAlbums();
+      setAlbumNotice(`“${name}” album ready hai ♡`);
+    } catch (error) {
+      setAlbumNotice('Album backend abhi ready nahi hai. BACKEND_ALBUMS_PROMPT.md backend mein implement karo.');
+    } finally { setCreatingAlbum(false); }
+  }
+  async function uploadAlbumFiles() {
+    if (!isAdmin || uploadingAlbumMedia) return;
+    if (!albumTargetId) { setAlbumNotice('Pehle album select karo.'); return; }
+    if (!albumFiles.length) { setAlbumNotice('Photo ya video select karo.'); return; }
+    const invalidFile = albumFiles.find(file => !file.type.startsWith('image/') && !file.type.startsWith('video/'));
+    if (invalidFile) { setAlbumNotice(`${invalidFile.name} photo/video file nahi hai.`); return; }
+    setUploadingAlbumMedia(true); setAlbumNotice('');
+    try {
+      for (let index = 0; index < albumFiles.length; index += 1) {
+        setAlbumUploadProgress(`${index + 1}/${albumFiles.length}`);
+        const formData = new FormData();
+        formData.append('file', albumFiles[index]);
+        const response = await fetch(`${API_BASE}/albums/${albumTargetId}/media`, { method: 'POST', body: formData });
+        if (!response.ok) throw new Error('Album media upload failed');
+      }
+      setAlbumFiles([]);
+      if (albumFileInputRef.current) albumFileInputRef.current.value = '';
+      await loadAlbums();
+      setAlbumNotice('Saari memories save ho gayi—date automatically add ho gayi ♡');
+    } catch (error) {
+      setAlbumNotice('Upload complete nahi hua. Backend album endpoints aur file limits check karo.');
+    } finally { setUploadingAlbumMedia(false); setAlbumUploadProgress(''); }
+  }
+  async function deleteAlbum(albumId, name) {
+    if (!isAdmin || !window.confirm(`“${name}” album aur uski saari memories delete karni hain?`)) return;
+    try {
+      const response = await fetch(`${API_BASE}/albums/${albumId}`, { method: 'DELETE' });
+      if (!response.ok && response.status !== 204) throw new Error('Delete failed');
+      if (String(albumTargetId) === String(albumId)) setAlbumTargetId('');
+      await loadAlbums();
+      setAlbumNotice('Album delete ho gaya.');
+    } catch (error) { setAlbumNotice('Album delete nahi hua. Backend check karo.'); }
+  }
+  async function deleteAlbumMedia(albumId, mediaId) {
+    if (!isAdmin || !window.confirm('Yeh memory album se delete karni hai?')) return;
+    try {
+      const response = await fetch(`${API_BASE}/albums/${albumId}/media/${mediaId}`, { method: 'DELETE' });
+      if (!response.ok && response.status !== 204) throw new Error('Delete failed');
+      await loadAlbums();
+      setAlbumNotice('Memory delete ho gayi.');
+    } catch (error) { setAlbumNotice('Memory delete nahi hui. Backend check karo.'); }
+  }
   function showSurprise() { if (!isBirthday) { alert(`🎂 Birthday is on ${targetDate.current.toLocaleDateString()}! Wait for the special day! 🎂`); return; } pauseMusic(); setCinematicOpen(true); }
   function finishCinematic() { setCinematicOpen(false); startBirthdayMusic(); setBirthdayJourneyOpen(true); }
   function closeBirthdayJourney() { setBirthdayJourneyOpen(false); startMusic(); }
@@ -193,11 +300,14 @@ export default function App() {
         ref={iframeRef}
         width="1"
         height="1"
-        src={ROMANTIC_MUSIC_URL.replace('autoplay=1', 'autoplay=0')}
+        src={youtubePlayerUrl(ROMANTIC_MUSIC_URL, false)}
         allow="autoplay; encrypted-media"
         className="youtube-audio-player"
         aria-hidden="true"
         title="Romantic Background Music"
+        onLoad={() => {
+          sendMusicCommand(musicOnRef.current ? 'playVideo' : 'pauseVideo');
+        }}
       />
       
       <main className="love-app font-sans">
@@ -211,7 +321,7 @@ export default function App() {
               <span className="brand-subtitle">A little world made only for you</span>
             </div>
             <div className="topbar-actions">
-              <button onClick={toggleMusic} aria-label={musicOn ? 'Pause music' : 'Play music'} className="topbar-button">
+              <button data-music-control onClick={toggleMusic} aria-label={musicOn ? 'Pause music' : 'Play music'} className="topbar-button">
                 <span aria-hidden="true">{musicOn ? '♫' : '♪'}</span>
                 {musicOn ? activeTrack === 'birthday' ? 'Birthday song playing' : 'Romance playing' : 'Play music'}
               </button>
@@ -280,6 +390,8 @@ export default function App() {
               </div>
             </aside>
           </div>
+
+          <AlbumGallery albums={albums} getMediaUrl={albumMediaUrl} onVideoPlay={pauseMusic} />
         </div>
         {surpriseOpen && <div className="modal-backdrop !z-[3000]"><div className="legacy-surprise-card max-w-lg rounded-[2rem] p-8 text-center [transform:perspective(1000px)_rotateX(2deg)]"><button onClick={() => setGiftOpened(true)} className={`text-7xl transition duration-500 hover:scale-125 hover:rotate-6 ${giftOpened ? 'animate-bounce' : 'animate-pulse'}`}>🎁</button><h2 className="mt-2 font-display text-3xl text-[#ffb6d4]">Happy Birthday, Babbu.</h2>{giftOpened ? <div className="mt-5 grid gap-3 text-left sm:grid-cols-3"><div className="rounded-2xl bg-white/6 p-3 text-center"><div className="text-2xl">💌</div><p className="mt-1 text-sm font-semibold">Love Letter</p><p className="mt-1 text-xs text-[#cfb5c4]">A personal note just for Babbu.</p></div><div className="rounded-2xl bg-white/6 p-3 text-center"><div className="text-2xl">🎵</div><p className="mt-1 text-sm font-semibold">Our Playlist</p><p className="mt-1 text-xs text-[#cfb5c4]">Play your special songs together.</p></div><div className="rounded-2xl bg-white/6 p-3 text-center"><div className="text-2xl">📸</div><p className="mt-1 text-sm font-semibold">Memory Reel</p><p className="mt-1 text-xs text-[#cfb5c4]">Relive every photo and moment.</p></div></div> : <p className="mt-4 leading-relaxed text-[#cfb5c4]">Tap the gift to open three little birthday surprises made with love.</p>}<p className="mt-5 leading-relaxed text-[#ffe3ef]">Meri jaan, tum mere ho. Bhagwan tujhe hamesha khush rakhe. Tu mere liye sabse khaas hai.<br /><br />I love you more than words can say. ♡</p><button onClick={() => setSurpriseOpen(false)} className="primary-romance-button mt-5">Close</button></div></div>}
         <Confetti active={surpriseOpen} />
@@ -297,6 +409,77 @@ export default function App() {
             <button disabled={uploading} onClick={uploadPhoto} className="primary-romance-button mt-3 w-full">{uploading ? 'Uploading…' : 'Upload photo  →'}</button>
             <div className="admin-photo-grid">{photos.map(photo => <div className="admin-photo-item" key={photo.id}><img src={`${API_BASE}/photos/${photo.id}/image`} alt="Uploaded" onError={e => { e.currentTarget.src = 'https://placehold.co/70x60/351029/ffb6d4?text=?'; }} /><button onClick={() => deletePhoto(photo.id)} className="delete-photo-button">Delete</button></div>)}</div>
           </div>
+          <div className="admin-card admin-album-card">
+            <div className="admin-card-heading">
+              <div>
+                <h4 className="font-semibold text-[#ffe3ef]">Albums</h4>
+                <p className="mt-1 text-xs text-[#cfb5c4]">Create a named album, then add photos or videos.</p>
+              </div>
+              <span aria-hidden="true">▣</span>
+            </div>
+
+            <form onSubmit={event => { event.preventDefault(); createAlbum(); }} className="admin-album-create">
+              <input
+                type="text"
+                maxLength="80"
+                value={albumName}
+                onChange={event => setAlbumName(event.target.value)}
+                placeholder="Album name — e.g. NIT Memories"
+                className="admin-album-input"
+                aria-label="New album name"
+              />
+              <button disabled={creatingAlbum || !albumName.trim()} type="submit" className="primary-romance-button">
+                {creatingAlbum ? 'Creating…' : 'Create album'}
+              </button>
+            </form>
+
+            <div className="admin-album-upload">
+              <label htmlFor="album-select">Choose album</label>
+              <select id="album-select" value={albumTargetId} onChange={event => setAlbumTargetId(event.target.value)} className="admin-album-select">
+                <option value="">Select an album</option>
+                {albums.map(album => <option value={entityId(album)} key={entityId(album)}>{album.name}</option>)}
+              </select>
+              <input
+                ref={albumFileInputRef}
+                type="file"
+                accept="image/*,video/*"
+                multiple
+                onChange={event => setAlbumFiles(Array.from(event.target.files ?? []))}
+                className="admin-file-input"
+              />
+              {albumFiles.length > 0 && <p className="admin-selected-files">{albumFiles.length} file{albumFiles.length === 1 ? '' : 's'} selected · photos/videos</p>}
+              <button disabled={uploadingAlbumMedia || !albumTargetId || !albumFiles.length} type="button" onClick={uploadAlbumFiles} className="primary-romance-button mt-3 w-full">
+                {uploadingAlbumMedia ? `Saving ${albumUploadProgress}…` : 'Save to album  →'}
+              </button>
+              <p className="admin-auto-date">Date upload ke din backend automatically save karega.</p>
+            </div>
+
+            {albumNotice && <p className="admin-album-notice" role="status">{albumNotice}</p>}
+
+            <div className="admin-album-list">
+              {albums.map(album => {
+                const albumId = entityId(album);
+                const mediaItems = albumMedia(album);
+                return <section className="admin-album-item" key={albumId}>
+                  <header>
+                    <div><strong>{album.name}</strong><small>{mediaItems.length} memories</small></div>
+                    <button type="button" onClick={() => deleteAlbum(albumId, album.name)} aria-label={`Delete album ${album.name}`}>Delete</button>
+                  </header>
+                  {mediaItems.length > 0 && <div className="admin-album-media-list">
+                    {mediaItems.map(media => {
+                      const mediaId = entityId(media);
+                      return <div className="admin-album-media" key={mediaId}>
+                        {isVideoMedia(media)
+                          ? <video src={albumMediaUrl(albumId, mediaId)} muted playsInline preload="metadata" />
+                          : <img src={albumMediaUrl(albumId, mediaId)} alt={media.originalName || 'Album memory'} loading="lazy" />}
+                        <button type="button" onClick={() => deleteAlbumMedia(albumId, mediaId)} aria-label="Delete this album memory">×</button>
+                      </div>;
+                    })}
+                  </div>}
+                </section>;
+              })}
+            </div>
+          </div>
           <div className="admin-card">
             <h4 className="font-semibold text-[#ffe3ef]">Add a feeling</h4>
             <p className="mt-1 text-xs text-[#cfb5c4]">Write anything that should live in the cloud.</p>
@@ -305,7 +488,7 @@ export default function App() {
           </div>
         </aside>
         <div className="mobile-floating-actions">
-          <button onClick={toggleMusic} aria-label={musicOn ? 'Pause music' : 'Play music'} className="topbar-button glass-panel">{musicOn ? activeTrack === 'birthday' ? '♫ Birthday' : '♫ Playing' : '♪ Music'}</button>
+          <button data-music-control onClick={toggleMusic} aria-label={musicOn ? 'Pause music' : 'Play music'} className="topbar-button glass-panel">{musicOn ? activeTrack === 'birthday' ? '♫ Birthday' : '♫ Playing' : '♪ Music'}</button>
           <button onClick={() => isAdmin ? setAdminOpen(!adminOpen) : setPinDialogOpen(true)} className="primary-romance-button">{isAdmin ? 'Admin Zone' : 'Admin Access'}</button>
         </div>
       </main>
