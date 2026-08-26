@@ -12,13 +12,27 @@ I have an existing production backend whose base URL is `https://mera-love.onren
    - `POST /api/admin/verify`
    - `GET /api/frustrations`
    - `POST /api/frustrations`
+   - `DELETE /api/frustrations/:id`
    - `GET /api/photos`
    - `POST /api/photos/upload`
    - `GET /api/photos/:id/image`
    - `DELETE /api/photos/:id`
-2. Reuse the same server-side admin protection currently used by photo upload/delete for every album mutation endpoint.
+2. `POST /api/admin/verify` must return the short-lived admin token in the `X-Admin-Token` response header after a valid PIN. The PIN must never be returned or reused as a mutation credential.
 3. Reuse the existing database and binary/media storage approach. Do not return photo or video bytes/base64 inside album JSON.
-4. Keep the existing frontend CORS origins working.
+4. Keep the existing frontend CORS origins working. Allow the `Authorization` request header and expose `X-Admin-Token` with `Access-Control-Expose-Headers: X-Admin-Token`.
+   - Permit unauthenticated `OPTIONS` preflight requests before the security/auth filter.
+   - Include `Authorization, Content-Type` in `Access-Control-Allow-Headers`.
+   - Allow `GET, POST, DELETE, OPTIONS` methods.
+   - Verify a browser preflight for `/api/albums` returns 2xx rather than 401/403.
+5. Require `Authorization: Bearer <adminToken>` on these protected endpoints:
+   - `POST /api/photos/upload`
+   - `DELETE /api/photos/:id`
+   - `DELETE /api/frustrations/:id`
+   - `POST /api/albums`
+   - `POST /api/albums/:albumId/media`
+   - `DELETE /api/albums/:albumId/media/:mediaId`
+   - `DELETE /api/albums/:albumId`
+6. Return HTTP 401 with `{ "message": "..." }` when a protected request has a missing, invalid, or expired token.
 
 ## Required data model
 
@@ -111,7 +125,9 @@ Return HTTP 200 and a JSON array, newest album first. Each album must include it
 
 - Sanitize filenames and never use the user filename directly as a filesystem path.
 - Prevent path traversal and IDOR; verify every media item belongs to the album in the URL.
-- Mutations must use the existing admin authorization mechanism rather than trusting a frontend `isAdmin` flag.
+- Protected mutations must validate the bearer token server-side rather than trusting a frontend `isAdmin` flag.
+- Never accept the PIN in a mutation request body, query parameter, or header.
+- Return a JSON `message` for 400, 401, 404, 413, and 415 responses so the frontend can display the backend error.
 - Database indexes should support album ordering and media lookup by album.
 - If storage/database cleanup partially fails, log it without exposing internal paths or secrets to the client.
 

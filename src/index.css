@@ -1724,6 +1724,46 @@ select:focus-visible {
   background: rgba(82, 7, 35, .8);
 }
 
+.admin-frustration-list {
+  display: grid;
+  max-height: 14rem;
+  gap: .45rem;
+  margin-top: .85rem;
+  overflow-y: auto;
+  padding-right: .2rem;
+}
+
+.admin-frustration-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .65rem;
+  border: 1px solid rgba(255, 193, 219, .09);
+  border-radius: .75rem;
+  padding: .55rem .6rem;
+  color: var(--muted-rose);
+  font-size: .62rem;
+  line-height: 1.4;
+  background: rgba(255,255,255,.025);
+}
+
+.admin-frustration-item span {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.admin-frustration-item button {
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 119, 155, .2);
+  border-radius: 999px;
+  padding: .28rem .48rem;
+  color: #ffc1d2;
+  font-size: .54rem;
+  background: rgba(174, 35, 80, .16);
+}
+
 @keyframes album-backdrop-in {
   from { opacity: 0; }
   to { opacity: 1; }

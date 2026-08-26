@@ -8,6 +8,17 @@ const API_BASE = 'https://mera-love.onrender.com/api';
 const ROMANTIC_MUSIC_URL = birthdayConfig.musicEmbedUrl;
 const BIRTHDAY_MUSIC_URL = birthdayConfig.birthdayMusicEmbedUrl;
 const MUSIC_TRACKS = { romance: ROMANTIC_MUSIC_URL, birthday: BIRTHDAY_MUSIC_URL };
+const ADMIN_TOKEN_KEY = 'adminToken';
+const MAX_ALBUM_MEDIA_SIZE_BYTES = 25 * 1024 * 1024;
+const ALLOWED_ALBUM_MEDIA_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'video/mp4',
+  'video/webm',
+  'video/quicktime',
+]);
 
 const emptyCountdown = { days: '00', hours: '00', minutes: '00', seconds: '00' };
 
@@ -37,6 +48,25 @@ function isVideoMedia(media) {
 
 function albumMediaUrl(albumId, mediaId) {
   return `${API_BASE}/albums/${albumId}/media/${mediaId}/file`;
+}
+
+function getStoredAdminToken() {
+  if (typeof window === 'undefined') return '';
+  return window.sessionStorage.getItem(ADMIN_TOKEN_KEY) || '';
+}
+
+async function getBackendMessage(response, fallback) {
+  try {
+    const result = await response.clone().json();
+    return typeof result?.message === 'string' && result.message.trim() ? result.message : fallback;
+  } catch (error) {
+    return fallback;
+  }
+}
+
+function isAllowedAlbumFile(file) {
+  if (ALLOWED_ALBUM_MEDIA_TYPES.has(file.type)) return true;
+  return !file.type && /\.(jpe?g|png|webp|gif|mp4|webm|mov)$/i.test(file.name);
 }
 
 function CountdownBox({ value, label }) {
@@ -99,7 +129,7 @@ function FloatingHearts() {
 }
 
 export default function App() {
-  const [isAdmin, setIsAdmin] = useState(false); const [adminOpen, setAdminOpen] = useState(false); const [pinDialogOpen, setPinDialogOpen] = useState(false); const [pin, setPin] = useState(''); const [pinChecking, setPinChecking] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(() => Boolean(getStoredAdminToken())); const [adminOpen, setAdminOpen] = useState(false); const [pinDialogOpen, setPinDialogOpen] = useState(false); const [pin, setPin] = useState(''); const [pinChecking, setPinChecking] = useState(false);
   const [photos, setPhotos] = useState([]); const [frustrations, setFrustrations] = useState([]);
   const [frustText, setFrustText] = useState(''); const [photoFile, setPhotoFile] = useState(null); const [uploading, setUploading] = useState(false);
   const [albums, setAlbums] = useState([]); const [albumName, setAlbumName] = useState(''); const [albumTargetId, setAlbumTargetId] = useState(''); const [albumFiles, setAlbumFiles] = useState([]);
@@ -217,7 +247,39 @@ export default function App() {
     setCinematicOpen(true);
   }, [isBirthday]);
 
-  // API requests intentionally match the original implementation.
+  function expireAdminSession() {
+    window.sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+    setIsAdmin(false);
+    setAdminOpen(false);
+    setPin('');
+    setPinDialogOpen(true);
+  }
+
+  async function protectedAdminFetch(url, options = {}, fallbackMessage = 'Request complete nahi hua.') {
+    const token = getStoredAdminToken();
+    if (!token) {
+      expireAdminSession();
+      throw new Error('Admin session missing hai. PIN dobara enter karo.');
+    }
+
+    const headers = new Headers(options.headers || {});
+    headers.set('Authorization', `Bearer ${token}`);
+    const response = await fetch(url, { ...options, headers });
+
+    if (response.status === 401) {
+      const message = await getBackendMessage(response, 'Admin session expire ho gaya. PIN dobara enter karo.');
+      expireAdminSession();
+      throw new Error(message);
+    }
+
+    if (!response.ok) {
+      throw new Error(await getBackendMessage(response, fallbackMessage));
+    }
+
+    return response;
+  }
+
+  // Public API requests keep their existing contract; protected mutations use the admin bearer token.
   const loadPhotos = useCallback(async () => { try { const response = await fetch(`${API_BASE}/photos`); const result = await response.json(); const photoList = Array.isArray(result) ? result : []; setPhotos(photoList); return photoList; } catch (err) { return []; } }, []);
   const loadFrustrations = useCallback(async () => { try { const response = await fetch(`${API_BASE}/frustrations`); const result = await response.json(); const frustrationList = Array.isArray(result) ? result : []; setFrustrations(frustrationList); return frustrationList; } catch (err) { console.error(err); return []; } }, []);
   const loadAlbums = useCallback(async () => { try { const response = await fetch(`${API_BASE}/albums`); if (!response.ok) return []; const result = await response.json(); const albumList = Array.isArray(result) ? result : Array.isArray(result?.albums) ? result.albums : []; setAlbums(albumList); return albumList; } catch (err) { return []; } }, []);
@@ -226,68 +288,150 @@ export default function App() {
   useEffect(() => { const timer = setInterval(() => { setFrustrations(items => { if (items.length) { const frustration = items[popupIndex.current % items.length]; popupIndex.current++; setFlipped(false); setPopup(frustration); } return items; }); }, 30000); return () => clearInterval(timer); }, []);
   useEffect(() => { if (!popup) return; const timer = setTimeout(() => setPopup(null), 8000); return () => clearTimeout(timer); }, [popup]);
 
-  async function verifyAdminPin() { if (!pin || pinChecking) return false; setPinChecking(true); try { const response = await fetch(`${API_BASE}/admin/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: pin }) }); const result = await response.json(); if (result.success) { setIsAdmin(true); setAdminOpen(true); setPinDialogOpen(false); setPin(''); alert('✅ Admin access granted!'); loadPhotos(); return true; } alert('❌ Wrong PIN!'); return false; } catch (err) { alert('Error connecting to server!'); return false; } finally { setPinChecking(false); } }
-  async function uploadPhoto() { if (!isAdmin) { alert('Admin access required!'); return; } if (!photoFile || uploading) { if (!photoFile) alert('Select a photo'); return; } const formData = new FormData(); formData.append('file', photoFile); setUploading(true); try { await fetch(`${API_BASE}/photos/upload`, { method: 'POST', body: formData }); setPhotoFile(null); if (photoInputRef.current) photoInputRef.current.value = ''; alert('Uploaded!'); loadPhotos(); } finally { setUploading(false); } }
-  async function deletePhoto(id) { if (!isAdmin) return; await fetch(`${API_BASE}/photos/${id}`, { method: 'DELETE' }); loadPhotos(); }
+  async function verifyAdminPin() {
+    if (pinChecking) return false;
+    if (pin.length < 6) {
+      alert('Admin PIN minimum 6 characters ka hona chahiye.');
+      return false;
+    }
+    setPinChecking(true);
+    try {
+      const response = await fetch(`${API_BASE}/admin/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: pin }) });
+      const result = await response.json().catch(() => ({}));
+      const adminToken = response.headers.get('X-Admin-Token');
+
+      if (response.ok) {
+        if (!adminToken) {
+          alert('Admin token response header nahi mila. Backend CORS mein Access-Control-Expose-Headers: X-Admin-Token add/check karo.');
+          return false;
+        }
+        window.sessionStorage.setItem(ADMIN_TOKEN_KEY, adminToken);
+        setIsAdmin(true);
+        setAdminOpen(true);
+        setPinDialogOpen(false);
+        setPin('');
+        setAlbumNotice('Admin session secured hai ♡');
+        alert('✅ Admin access granted!');
+        loadPhotos();
+        loadAlbums();
+        return true;
+      }
+
+      alert(result.message || '❌ Wrong PIN!');
+      return false;
+    } catch (err) {
+      alert('Error connecting to server!');
+      return false;
+    } finally { setPinChecking(false); }
+  }
+
+  async function uploadPhoto() {
+    if (!isAdmin) { expireAdminSession(); return; }
+    if (!photoFile || uploading) { if (!photoFile) alert('Select a photo'); return; }
+    const formData = new FormData();
+    formData.append('file', photoFile);
+    setUploading(true);
+    try {
+      await protectedAdminFetch(`${API_BASE}/photos/upload`, { method: 'POST', body: formData }, 'Photo upload nahi hua.');
+      setPhotoFile(null);
+      if (photoInputRef.current) photoInputRef.current.value = '';
+      alert('Uploaded!');
+      loadPhotos();
+    } catch (error) {
+      alert(error.message);
+    } finally { setUploading(false); }
+  }
+
+  async function deletePhoto(id) {
+    if (!isAdmin) { expireAdminSession(); return; }
+    try {
+      await protectedAdminFetch(`${API_BASE}/photos/${id}`, { method: 'DELETE' }, 'Photo delete nahi hua.');
+      setPhotos(items => items.filter(photo => String(entityId(photo)) !== String(id)));
+    } catch (error) { alert(error.message); }
+  }
+
   async function addFrustration() { if (!isAdmin) { alert('Admin access required!'); return; } const text = frustText.trim(); if (!text) { alert('Write something!'); return; } await fetch(`${API_BASE}/frustrations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(text) }); setFrustText(''); await loadFrustrations(); }
+  async function deleteFrustration(id) {
+    if (!isAdmin) { expireAdminSession(); return; }
+    if (!window.confirm('Yeh feeling permanently delete karni hai?')) return;
+    try {
+      await protectedAdminFetch(`${API_BASE}/frustrations/${id}`, { method: 'DELETE' }, 'Feeling delete nahi hui.');
+      setFrustrations(items => items.filter(item => String(entityId(item)) !== String(id)));
+      setPopup(current => String(entityId(current)) === String(id) ? null : current);
+    } catch (error) { alert(error.message); }
+  }
   async function createAlbum() {
-    if (!isAdmin || creatingAlbum) return;
+    if (!isAdmin) { expireAdminSession(); return; }
+    if (creatingAlbum) return;
     const name = albumName.trim();
     if (!name) { setAlbumNotice('Album ka naam likho.'); return; }
     setCreatingAlbum(true); setAlbumNotice('');
     try {
-      const response = await fetch(`${API_BASE}/albums`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
-      if (!response.ok) throw new Error('Album create failed');
+      const response = await protectedAdminFetch(`${API_BASE}/albums`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }, 'Album create nahi hua.');
       const createdAlbum = await response.json();
       setAlbumName('');
       if (entityId(createdAlbum)) setAlbumTargetId(String(entityId(createdAlbum)));
       await loadAlbums();
       setAlbumNotice(`“${name}” album ready hai ♡`);
     } catch (error) {
-      setAlbumNotice('Album backend abhi ready nahi hai. BACKEND_ALBUMS_PROMPT.md backend mein implement karo.');
+      setAlbumNotice(error.message);
     } finally { setCreatingAlbum(false); }
   }
   async function uploadAlbumFiles() {
-    if (!isAdmin || uploadingAlbumMedia) return;
-    if (!albumTargetId) { setAlbumNotice('Pehle album select karo.'); return; }
+    if (!isAdmin) { expireAdminSession(); return; }
+    if (uploadingAlbumMedia) return;
     if (!albumFiles.length) { setAlbumNotice('Photo ya video select karo.'); return; }
-    const invalidFile = albumFiles.find(file => !file.type.startsWith('image/') && !file.type.startsWith('video/'));
-    if (invalidFile) { setAlbumNotice(`${invalidFile.name} photo/video file nahi hai.`); return; }
+    const invalidFile = albumFiles.find(file => !isAllowedAlbumFile(file));
+    if (invalidFile) {
+      setAlbumFiles([]);
+      if (albumFileInputRef.current) albumFileInputRef.current.value = '';
+      setAlbumNotice(`${invalidFile.name} supported photo/video format nahi hai.`);
+      return;
+    }
+    const oversizedFile = albumFiles.find(file => file.size > MAX_ALBUM_MEDIA_SIZE_BYTES);
+    if (oversizedFile) {
+      setAlbumFiles([]);
+      if (albumFileInputRef.current) albumFileInputRef.current.value = '';
+      setAlbumNotice(`${oversizedFile.name} 25 MB se badi hai. Chhoti file choose karo.`);
+      return;
+    }
+    if (!albumTargetId) { setAlbumNotice('Pehle album select karo.'); return; }
     setUploadingAlbumMedia(true); setAlbumNotice('');
     try {
       for (let index = 0; index < albumFiles.length; index += 1) {
         setAlbumUploadProgress(`${index + 1}/${albumFiles.length}`);
         const formData = new FormData();
         formData.append('file', albumFiles[index]);
-        const response = await fetch(`${API_BASE}/albums/${albumTargetId}/media`, { method: 'POST', body: formData });
-        if (!response.ok) throw new Error('Album media upload failed');
+        await protectedAdminFetch(`${API_BASE}/albums/${albumTargetId}/media`, { method: 'POST', body: formData }, `${albumFiles[index].name} upload nahi hua.`);
       }
       setAlbumFiles([]);
       if (albumFileInputRef.current) albumFileInputRef.current.value = '';
       await loadAlbums();
       setAlbumNotice('Saari memories save ho gayi—date automatically add ho gayi ♡');
     } catch (error) {
-      setAlbumNotice('Upload complete nahi hua. Backend album endpoints aur file limits check karo.');
+      setAlbumNotice(error.message);
     } finally { setUploadingAlbumMedia(false); setAlbumUploadProgress(''); }
   }
   async function deleteAlbum(albumId, name) {
-    if (!isAdmin || !window.confirm(`“${name}” album aur uski saari memories delete karni hain?`)) return;
+    if (!isAdmin) { expireAdminSession(); return; }
+    if (!window.confirm(`“${name}” album aur uski saari memories delete karni hain?`)) return;
     try {
-      const response = await fetch(`${API_BASE}/albums/${albumId}`, { method: 'DELETE' });
-      if (!response.ok && response.status !== 204) throw new Error('Delete failed');
+      await protectedAdminFetch(`${API_BASE}/albums/${albumId}`, { method: 'DELETE' }, 'Album delete nahi hua.');
       if (String(albumTargetId) === String(albumId)) setAlbumTargetId('');
-      await loadAlbums();
+      setAlbums(items => items.filter(album => String(entityId(album)) !== String(albumId)));
       setAlbumNotice('Album delete ho gaya.');
-    } catch (error) { setAlbumNotice('Album delete nahi hua. Backend check karo.'); }
+    } catch (error) { setAlbumNotice(error.message); }
   }
   async function deleteAlbumMedia(albumId, mediaId) {
-    if (!isAdmin || !window.confirm('Yeh memory album se delete karni hai?')) return;
+    if (!isAdmin) { expireAdminSession(); return; }
+    if (!window.confirm('Yeh memory album se delete karni hai?')) return;
     try {
-      const response = await fetch(`${API_BASE}/albums/${albumId}/media/${mediaId}`, { method: 'DELETE' });
-      if (!response.ok && response.status !== 204) throw new Error('Delete failed');
-      await loadAlbums();
+      await protectedAdminFetch(`${API_BASE}/albums/${albumId}/media/${mediaId}`, { method: 'DELETE' }, 'Memory delete nahi hui.');
+      setAlbums(items => items.map(album => String(entityId(album)) === String(albumId)
+        ? { ...album, media: albumMedia(album).filter(media => String(entityId(media)) !== String(mediaId)) }
+        : album));
       setAlbumNotice('Memory delete ho gayi.');
-    } catch (error) { setAlbumNotice('Memory delete nahi hui. Backend check karo.'); }
+    } catch (error) { setAlbumNotice(error.message); }
   }
   function showSurprise() { if (!isBirthday) { alert(`🎂 Birthday is on ${targetDate.current.toLocaleDateString()}! Wait for the special day! 🎂`); return; } pauseMusic(); setCinematicOpen(true); }
   function finishCinematic() { setCinematicOpen(false); startBirthdayMusic(); setBirthdayJourneyOpen(true); }
@@ -396,7 +540,7 @@ export default function App() {
         {surpriseOpen && <div className="modal-backdrop !z-[3000]"><div className="legacy-surprise-card max-w-lg rounded-[2rem] p-8 text-center [transform:perspective(1000px)_rotateX(2deg)]"><button onClick={() => setGiftOpened(true)} className={`text-7xl transition duration-500 hover:scale-125 hover:rotate-6 ${giftOpened ? 'animate-bounce' : 'animate-pulse'}`}>🎁</button><h2 className="mt-2 font-display text-3xl text-[#ffb6d4]">Happy Birthday, Babbu.</h2>{giftOpened ? <div className="mt-5 grid gap-3 text-left sm:grid-cols-3"><div className="rounded-2xl bg-white/6 p-3 text-center"><div className="text-2xl">💌</div><p className="mt-1 text-sm font-semibold">Love Letter</p><p className="mt-1 text-xs text-[#cfb5c4]">A personal note just for Babbu.</p></div><div className="rounded-2xl bg-white/6 p-3 text-center"><div className="text-2xl">🎵</div><p className="mt-1 text-sm font-semibold">Our Playlist</p><p className="mt-1 text-xs text-[#cfb5c4]">Play your special songs together.</p></div><div className="rounded-2xl bg-white/6 p-3 text-center"><div className="text-2xl">📸</div><p className="mt-1 text-sm font-semibold">Memory Reel</p><p className="mt-1 text-xs text-[#cfb5c4]">Relive every photo and moment.</p></div></div> : <p className="mt-4 leading-relaxed text-[#cfb5c4]">Tap the gift to open three little birthday surprises made with love.</p>}<p className="mt-5 leading-relaxed text-[#ffe3ef]">Meri jaan, tum mere ho. Bhagwan tujhe hamesha khush rakhe. Tu mere liye sabse khaas hai.<br /><br />I love you more than words can say. ♡</p><button onClick={() => setSurpriseOpen(false)} className="primary-romance-button mt-5">Close</button></div></div>}
         <Confetti active={surpriseOpen} />
         {popup && <div className="modal-backdrop !z-[2000]"><button onClick={() => setPopup(null)} aria-label="Close note" className="absolute top-5 right-5 text-3xl text-[#ffb6d4] transition hover:rotate-90">×</button><button onClick={() => setFlipped(!flipped)} className="h-100 w-80 [perspective:1000px]"><div className={`relative h-full w-full rounded-[2rem] transition-transform duration-600 [transform-style:preserve-3d] ${flipped ? '[transform:rotateY(180deg)]' : ''}`}><div className="popup-face absolute inset-0 flex flex-col items-center justify-center rounded-[2rem] p-6 text-center [backface-visibility:hidden]"><div className="text-4xl text-[#ff9ac5]">“</div><p className="mt-4 font-display text-xl leading-relaxed">{popup.text}</p><small className="mt-4 text-[#cfb5c4]">{new Date(popup.createdAt).toLocaleString()}</small><span className="mt-6 text-[0.65rem] uppercase tracking-[.18em] text-[#ff9ac5]">Tap to turn</span></div><div className="popup-face absolute inset-0 flex flex-col items-center justify-center rounded-[2rem] p-6 text-center [backface-visibility:hidden] [transform:rotateY(180deg)]"><div className="text-4xl text-[#ff9ac5]">♡</div><p className="mt-4 leading-relaxed">Babu gussa kyu kar raha hai?<br /><br />Bachha, saath hu na tere mein phir—hamesha rahunga.</p></div></div></button></div>}
-        {pinDialogOpen && <div className="modal-backdrop"><form onSubmit={e => { e.preventDefault(); verifyAdminPin(); }} className="dialog-card"><span className="eyebrow">Private little corner</span><h2 className="mt-2 text-3xl">Admin Access</h2><p className="mt-2 text-sm text-[#cfb5c4]">Enter the 4-digit Admin PIN.</p><input autoFocus inputMode="numeric" maxLength="4" value={pin} onChange={e => setPin(e.target.value)} className="dialog-input mt-5 p-3 text-center text-xl tracking-[.5em]" aria-label="4-digit Admin PIN" /><div className="mt-5 flex gap-3"><button disabled={pinChecking} type="button" onClick={() => { setPinDialogOpen(false); setPin(''); }} className="ghost-button flex-1 disabled:opacity-50">Cancel</button><button disabled={pinChecking || !pin} type="submit" className="primary-romance-button flex-1">{pinChecking ? 'Checking…' : 'Unlock'}</button></div></form></div>}
+        {pinDialogOpen && <div className="modal-backdrop"><form onSubmit={e => { e.preventDefault(); verifyAdminPin(); }} className="dialog-card"><span className="eyebrow">Private little corner</span><h2 className="mt-2 text-3xl">Admin Access</h2><p className="mt-2 text-sm text-[#cfb5c4]">Enter your Admin PIN (minimum 6 characters).</p><input autoFocus type="password" minLength={6} value={pin} onChange={e => setPin(e.target.value)} className="dialog-input mt-5 p-3 text-center text-xl tracking-[.5em]" aria-label="Admin PIN" /><div className="mt-5 flex gap-3"><button disabled={pinChecking} type="button" onClick={() => { setPinDialogOpen(false); setPin(''); }} className="ghost-button flex-1 disabled:opacity-50">Cancel</button><button disabled={pinChecking || pin.length < 6} type="submit" className="primary-romance-button flex-1">{pinChecking ? 'Checking…' : 'Unlock'}</button></div></form></div>}
         <aside className={`admin-drawer ${adminOpen ? 'admin-drawer-open' : 'admin-drawer-closed'}`}>
           <div className="flex items-center justify-between">
             <div><span className="eyebrow">Private controls</span><h3 className="mt-1 text-3xl">Admin Zone</h3></div>
@@ -442,13 +586,13 @@ export default function App() {
               <input
                 ref={albumFileInputRef}
                 type="file"
-                accept="image/*,video/*"
+                accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime,.mov"
                 multiple
                 onChange={event => setAlbumFiles(Array.from(event.target.files ?? []))}
                 className="admin-file-input"
               />
               {albumFiles.length > 0 && <p className="admin-selected-files">{albumFiles.length} file{albumFiles.length === 1 ? '' : 's'} selected · photos/videos</p>}
-              <button disabled={uploadingAlbumMedia || !albumTargetId || !albumFiles.length} type="button" onClick={uploadAlbumFiles} className="primary-romance-button mt-3 w-full">
+              <button disabled={uploadingAlbumMedia || !albumFiles.length} type="button" onClick={uploadAlbumFiles} className="primary-romance-button mt-3 w-full">
                 {uploadingAlbumMedia ? `Saving ${albumUploadProgress}…` : 'Save to album  →'}
               </button>
               <p className="admin-auto-date">Date upload ke din backend automatically save karega.</p>
@@ -485,6 +629,15 @@ export default function App() {
             <p className="mt-1 text-xs text-[#cfb5c4]">Write anything that should live in the cloud.</p>
             <textarea rows="3" value={frustText} onChange={e => setFrustText(e.target.value)} placeholder="Write frustration or emotion..." className="admin-textarea mt-3 resize-none p-3" />
             <button onClick={addFrustration} className="primary-romance-button mt-3 w-full">Add to cloud  ♡</button>
+            {frustrations.length > 0 && <div className="admin-frustration-list">
+              {frustrations.map(frustration => {
+                const frustrationId = entityId(frustration);
+                return <div className="admin-frustration-item" key={frustrationId ?? frustration.createdAt}>
+                  <span>{String(frustration.text ?? '').slice(0, 90)}</span>
+                  {frustrationId && <button type="button" onClick={() => deleteFrustration(frustrationId)} aria-label="Delete this feeling">Delete</button>}
+                </div>;
+              })}
+            </div>}
           </div>
         </aside>
         <div className="mobile-floating-actions">
